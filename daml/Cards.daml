@@ -3,6 +3,8 @@ daml 1.2
 module Spades where
 
 import DA.Action.State
+import DA.List
+
 
 -- The standard deck of cards
 
@@ -57,3 +59,36 @@ shuffle (x::xs) = do
   i <- randomInt (0, length xs)
   (ls,hs) <- splitAt i <$> (shuffle xs)
   pure (ls ++ [x] ++ hs)
+
+
+-- Tricks and scoring
+
+-- A spade always trumps a non-spade, a card of the lead suit always trumps all
+--  non-spades, and otherwise cards are compared by their values
+compareWithLead : Suit -> Card -> Card -> Ordering
+compareWithLead sl (Card v1 s1) (Card v2 s2)
+  = let scmp = compare (suitToInt s1) (suitToInt s2)
+     in if scmp == EQ then compare v1 v2 else scmp
+  where suitToInt : Suit -> Int
+        suitToInt s | s == S    = 2
+                    | s == sl   = 1
+                    | otherwise = 0
+
+-- from GHC Prelude
+maximumBy : (a -> a -> Ordering) -> [a] -> a
+maximumBy f = foldl1 (\x y -> if f x y == GT then x else y)
+
+type Trick = [Card]
+
+-- returns the index of the player who won the given trick, using `compareWithLead`
+trickWinner : Trick -> Int
+trickWinner (cl::cs) = snd $ maximumBy (\(c1,_) (c2,_) -> compareWithLead (suit cl) c1 c2) (zip (cl::cs) [0..])
+trickWinner _ = error "trickWinner: empty list"
+
+score : Int -> Int -> Int
+score bet won | bet < 0 || bet > 13 = error $ "invalid bet: " <> show bet 
+              | won < 0 || won > 13 = error $ "invalid number of wins: " <> show won
+              | bet == 0 && won == 0 = 100
+              | bet == 0 && won >= 1 = -100
+              | won >= bet           = 10*bet + (won - bet)
+              | otherwise            = -10*bet
