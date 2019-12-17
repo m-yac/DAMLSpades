@@ -1,40 +1,75 @@
--- Copyright (c) 2019 The DAML Authors. All rights reserved.
--- SPDX-License-Identifier: Apache-2.0
 
 daml 1.2
 module Main where
 
-import Cards
-import Spades
 import DA.List
 import DA.Action
+
+import Utils
+import Cards
+import Spades
+
+
+makePlay : [Party] -> ContractId Spades -> [ContractId Hand]
+                   -> Int -> Card -> Scenario (ContractId Play, [ContractId Hand])
+makePlay players gameId handIds i card = do
+  game <- submit (players !! i) do fetch gameId
+  (playId, handId) <- submit (players !! i) do exercise (handIds !! i) MakePlay with card; state = game.state
+  pure (playId, replaceIdx i handId handIds)
+
 
 setup = scenario do
   players <- mapA getParty ["Player1", "Player2", "Player3", "Player4"]
   dealer <- getParty "Dealer"
 
-  -- Player1 makes the game proposal
-  propId <- submit (players !! 0) do
-    create GameProposal with players = [players !! 0]; dealerOpt = None
+  -- Player4 makes the game proposal
+  propId <- submit (players !! 3) do
+    create GameProposal with players = [players !! 3]; dealerOpt = None
 
-  -- Player1 invites the rest of the players, and they all accept
+  -- Player4 invites the rest of the players, and they all accept
   propId <- foldlA (\ propId newPlayer -> do
-    inviteId <- submit (players !! 0) do
-      exercise propId InvitePlayer with player = (players !! 0); newPlayer
-    submit newPlayer do exercise inviteId AcceptPlayer) propId (drop 1 players)
+    inviteId <- submit (players !! 3) do
+      exercise propId InvitePlayer with player = (players !! 3); newPlayer
+    submit newPlayer do exercise inviteId AcceptPlayer) propId (reverse $ take 3 players)
   
   -- Player4 invites the dealer and they accept
   inviteId <- submit (players !! 3) do
     exercise propId InviteDealer with player = (players !! 3); newDealer = dealer
   propId <- submit dealer do exercise inviteId AcceptDealer
 
-  -- The dealer starts the game and deals
-  gameId <- submit dealer do exercise propId StartGame with party = dealer
-  dealId <- submit dealer do exercise gameId StartDeal
-  handIds <- submit dealer do exercise dealId DoDeal with gameId; seed = 5
-  gameId <- submit dealer do exercise gameId AddHands with newHands = handIds
-  -- gameId <- submit dealer do exercise gameId TryThing -- with newHands = handIds
+  -- The dealer starts the bidding and deals
+  (dealId, biddingId) <- submit dealer do exercise propId StartBidding with party = dealer
+  handIds <- submit dealer do exercise dealId DoDeal with seed = 5
 
-  -- submit (players !! 0) do exercise (handIds !! 0) TryThing
+  -- The players add their bids (based on their hands)
+  biddingId <- submit (players !! 0) do exercise biddingId AddBid with player = players !! 0, bid = 4
+  biddingId <- submit (players !! 1) do exercise biddingId AddBid with player = players !! 1, bid = 5
+  biddingId <- submit (players !! 2) do exercise biddingId AddBid with player = players !! 2, bid = 8
+  biddingId <- submit (players !! 3) do exercise biddingId AddBid with player = players !! 3, bid = 1
+
+  -- The dealer starts the game
+  gameId <- submit dealer do exercise biddingId StartGame
+  
+  -- Player1 makes a play (D 11) and the dealer updates the board
+  (playId, handIds) <- makePlay players gameId handIds 0 (Card D 11)
+  gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
+
+  -- Player2 makes a good play (D 13) and the dealer updates the board
+  (playId, handIds) <- makePlay players gameId handIds 1 (Card D 13)
+  gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
+
+  -- Player3 makes a bad play (H 2) and the dealer updates the board
+  (playId, handIds) <- makePlay players gameId handIds 2 (Card H 2)
+  gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
+
+  -- Player4 makes a good play (S 1) and the dealer updates the board
+  (playId, handIds) <- makePlay players gameId handIds 3 (Card S 1)
+  gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
+
+  -- Player4 won the last trick, so they play first
+  (playId, handIds) <- makePlay players gameId handIds 3 (Card D 12)
+  gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
+
+  -- and so on...
 
   pure ()

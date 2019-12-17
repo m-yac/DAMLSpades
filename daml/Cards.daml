@@ -14,17 +14,12 @@ data Card = Card with
   value : Int
     deriving (Eq, Ord)
 
--- constructor for `Card`s which insures values are in [1,13]
-card : Suit -> Int -> Card
-card s v | v >= 1 && v <= 13 = Card s v
-         | otherwise = error "malformed card"
-
 instance Show Card where
   show (Card s v) = show v <> " " <> show s
 
 -- a standard 52-card deck
 stdDeck : [Card]
-stdDeck = card <$> [S,C,H,D] <*> [1..13]
+stdDeck = Card <$> [S,C,H,D] <*> [1..13]
 
 
 -- Randomness and shuffling

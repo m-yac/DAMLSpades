@@ -2,9 +2,14 @@
 daml 1.2
 module Spades where
 
-import Cards
 import DA.List
 import DA.Optional
+import DA.Next.Map (Map)
+import qualified DA.Next.Map as Map
+import qualified DA.Foldable as Foldable
+
+import Utils
+import Cards
 
 
 -- A spade always trumps a non-spade, a card of the lead suit always trumps all
@@ -18,31 +23,58 @@ compareWithLead sl (Card s1 v1) (Card s2 v2)
                     | s == sl   = 1
                     | otherwise = 0
 
--- from GHC Prelude
-maximumBy : (a -> a -> Ordering) -> [a] -> a
-maximumBy f = foldl1 (\x y -> if f x y == GT then x else y)
-
-type Trick = [Card]
-
--- returns the index of the player who won the given trick, using `compareWithLead`
-trickWinner : Trick -> Int
-trickWinner (cl::cs) = snd $ maximumBy (\(c1,_) (c2,_) -> compareWithLead (suit cl) c1 c2) (zip (cl::cs) [0..])
+-- returns the player who won the given trick, using `compareWithLead`
+trickWinner : [(Party,Card)] -> Party
+trickWinner (ld::xs) = fst $ maximumBy (\(_,c1) (_,c2) -> compareWithLead (suit (snd ld)) c1 c2) (ld::xs)
 trickWinner _ = error "trickWinner: empty list"
 
-score : Int -> Int -> Int
-score bet won | bet < 0 || bet > 13 = error $ "invalid bet: " <> show bet 
-              | won < 0 || won > 13 = error $ "invalid number of wins: " <> show won
-              | bet == 0 && won == 0 = 100
-              | bet == 0 && won >= 1 = -100
-              | won >= bet           = 10*bet + (won - bet)
-              | otherwise            = -10*bet
+-- given a bet and a total number of wins, returns the score
+calcScore : Int -> Int -> Int
+calcScore bet won | bet < 0 || bet > 13 = error $ "invalid bet: " <> show bet 
+                  | won < 0 || won > 13 = error $ "invalid number of wins: " <> show won
+                  | bet == 0 && won == 0 = 100
+                  | bet == 0 && won >= 1 = -100
+                  | won >= bet           = 10*bet + (won - bet)
+                  | otherwise            = -10*bet
 
--- from the list-grouping Haskell package
-splitEvery : Int -> [a] -> [[a]]
-splitEvery _ [] = []
-splitEvery n xs = let (as,bs) = splitAt n xs in as :: splitEvery n bs
+addToScores : [Party] -> Map Party Int -- bids
+                      -> Map Party Int -- numbers of wins
+                      -> Map Party Int -- old scores
+                      -> Map Party Int -- new scores
+addToScores players bids wins scores
+  = Map.fromList $ map (\(player, score) ->
+      let bid   = fromSome $ Map.lookup player bids
+          won   = fromSome $ Map.lookup player wins
+       in (player, score + calcScore bid won)) (Map.toList scores)
 
+data GameState = GameState
+  with
+    board  : [(Party,Card)]
+    upNext : Party
+    wins   : Map.Map Party Int
+  deriving (Eq, Ord, Show)
 
+-- given an order of play, creates an initial `GameState`
+initialState : [Party] -> GameState
+initialState players = GameState [] (head players) (Map.fromList (map ((,0)) players))
+
+-- returns the next game state given an order of play, the current game state, and the next card played
+nextState : [Party] -> GameState -> Card -> GameState
+nextState players (GameState board upNow wins) card
+  | length board == 3 = GameState board' winner wins'
+  where board' = (upNow,card) :: board
+        winner = trickWinner board'
+        winnerWins  = fromSome (Map.lookup winner wins)
+        wins' = Map.insert winner (winnerWins + 1) wins
+nextState players (GameState board upNow wins) card
+  = GameState board' upNext wins
+  where board' = (upNow,card) :: (if length board >= 4 then [] else board)
+        upNowIdx = fromSome (upNow `elemIndex` players)
+        upNext = if upNowIdx == 3 then players !! 0 else players !! (upNowIdx + 1)
+
+-- returns whether or not all cards must have been played
+isFinalState : GameState -> Bool
+isFinalState (GameState _ _ wins) = Foldable.sum wins == 13
 
 
 template GameProposal
@@ -73,22 +105,16 @@ template GameProposal
         assertMsg "A dealer has already been invited" $ dealerOpt == None
         create DealerInvite with proposal = this; newDealer
 
-    choice StartGame : ContractId Spades
+    choice StartBidding : (ContractId Deal, ContractId Bidding)
       with
         party : Party
       controller party
       do
         assert $ party `elem` players || Some party == dealerOpt
         assertMsg "Not enough parties have joined" $ length players == 4 && isSome dealerOpt
-        create Spades with players; dealer = fromSome dealerOpt; hands = []; topCard = None
-
-    -- controller dealerOpt can
-    --   nonconsuming StartGame : ContractId Deal
-    --     do
-    --       assertMsg "Not enough parties have joined" $ length players == 4 && isSome dealerOpt
-    --       let dealer = fromSome dealerOpt
-    --       create Deal with players; dealer
-
+        dealId <- create Deal with players; dealer = fromSome dealerOpt
+        biddingId <- create Bidding with players; dealer = fromSome dealerOpt; bids = Map.empty; scores = Map.empty
+        pure (dealId, biddingId)
 
 template PlayerInvite
   with
@@ -114,37 +140,70 @@ template DealerInvite
         do
           create proposal with dealerOpt = Some newDealer
 
+template Bidding
+  with
+    players : [Party]
+    dealer  : Party
+    bids    : Map Party Int
+    scores  : Map Party Int
+  where
+    signatory players, dealer
+    ensure unique players && length players == 4
+  
+    choice AddBid : ContractId Bidding
+      with
+        player : Party
+        bid : Int
+      controller player
+      do
+        assert $ player `elem` players
+        assertMsg "Player has already given a bid" $ isNone (Map.lookup player bids)
+        assertMsg "Bid must be between 0 and 13" $ bid >= 0 && bid <= 13
+        create this with bids = Map.insert player bid bids
+
+    controller dealer can
+      StartGame : ContractId Spades
+        do
+          assertMsg "Not all bids have been placed" $ Foldable.length bids == 4 && all (`Map.member` bids) players
+          create Spades with players; dealer; bids; state = initialState players; scores
+
+data GameResult = Ongoing (ContractId Spades)
+                | RoundOver (ContractId Bidding)
+                | GameOver (Map Party Int) -- the final scores
+
+fromOngoing : GameResult -> ContractId Spades
+fromOngoing (Ongoing gameId) = gameId
+fromOngoing _ = error "Game or round has ended"
 
 template Spades
   with
     players : [Party]
     dealer  : Party
-    hands   : [ContractId Hand]
-    topCard : Optional Card
+    bids    : Map Party Int
+    state   : GameState
+    scores  : Map Party Int
   where
     signatory players, dealer
     ensure unique players && length players == 4
+                          && Foldable.length state.wins == 4
+                          && all (`Map.member` state.wins) players
 
     controller dealer can
-
-      nonconsuming StartDeal : ContractId Deal
-        do
-          assert $ length hands == 0
-          create Deal with players; dealer
-      
-      AddHands : ContractId Spades
+      MakeNextPlay : GameResult
         with
-          newHands : [ContractId Hand]
+          playId : ContractId Play
         do
-          assert $ length hands == 0 && length newHands == 4
-          create this with hands = newHands
-    
-    --   TryThing : ContractId Spades
-    --     do
-    --       assert $ length hands == 4
-    --       cd <- exercise (hands !! 0) GetTop
-    --       create this with topCard = Some cd
-      
+          play <- fetch playId
+          assert $ play.state == state
+          let state' = nextState players state play.card
+          exercise playId FinalizePlay
+          if isFinalState state'
+          then let scores' = addToScores players bids state.wins scores
+                in if any (\player -> fromSome (Map.lookup player scores) >= 500) players
+                   then pure (GameOver scores')
+                   else RoundOver <$> create Bidding with players; dealer; bids = Map.empty; scores = scores'
+          else Ongoing <$> create this with state = state'
+
 
 template Deal
   with
@@ -156,40 +215,42 @@ template Deal
     controller dealer can
       DoDeal : [ContractId Hand]
         with
-          gameId : ContractId Spades
           seed : Int
         do 
           let deck = runWithSeed (shuffle stdDeck) seed
-          mapA (\(player,hand) -> create Hand with gameId; player; dealer; hand = sort hand)
-               (zip (reverse players) (splitEvery 13 deck))
+          mapA (\(player,hand) -> create Hand with player; dealer; hand = sort hand)
+               (zip players (splitEvery 13 deck))
 
 template Hand
   with
-    gameId : ContractId Spades
     player : Party
     dealer : Party
     hand   : [Card]
   where
     signatory dealer
     observer player
+    ensure unique hand
 
-    -- controller dealer can
-    --   nonconsuming GetTop : Card
-    --     do
-    --       pure (head hand)
+    controller player can
+      MakePlay : (ContractId Play, ContractId Hand)
+        with
+          card  : Card
+          state : GameState
+        do
+          assertMsg "Can only play cards in your hand" $ card `elem` hand
+          play <- create Play with player; dealer; card; state
+          hand <- create this with hand = delete card hand
+          pure (play, hand)
 
-    -- controller player can
-    --   nonconsuming TryThing : Party
-    --     do
-    --       game <- fetch gameId
-    --       pure game.dealer
-
-
--- Hand has a choice named RequestPlay, which takes a game state and an index
---   and is controlled by the player
--- Play is a contract signed by both a player and the dealer containing
---  a game state and a card value
--- Spades has a choice named MakePlay, which takes a Play and enacts it only if
---  the gamestate matches the current one
--- Game state is a type synonym of [(Player, Optional Card)] which always
---  contains unique lists of length 4
+template Play
+  with
+    player : Party
+    dealer : Party
+    card   : Card
+    state  : GameState
+  where
+    signatory player, dealer
+  
+    controller dealer can
+      FinalizePlay : ()
+        do pure ()
