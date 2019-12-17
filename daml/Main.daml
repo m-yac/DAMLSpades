@@ -4,36 +4,37 @@
 daml 1.2
 module Main where
 
-type AssetId = ContractId Asset
-
-template Asset
-  with
-    issuer : Party
-    owner  : Party
-    name   : Text
-  where
-    ensure name /= ""
-    signatory issuer
-    controller owner can
-      Give : AssetId
-        with
-          newOwner : Party
-        do
-          create this with
-            owner = newOwner
+import Cards
+import Spades
+import DA.List
+import DA.Action
 
 setup = scenario do
-  alice <- getParty "Alice"
-  bob <- getParty "Bob"
+  players <- mapA getParty ["Player1", "Player2", "Player3", "Player4"]
+  dealer <- getParty "Dealer"
 
-  aliceTV <- submit alice do
-    create Asset with
-      issuer = alice
-      owner = alice
-      name = "TV"
+  -- Player1 makes the game proposal
+  propId <- submit (players !! 0) do
+    create GameProposal with players = [players !! 0]; dealerOpt = None
 
-  bobTV <- submit alice do
-    exercise aliceTV Give with newOwner = bob
+  -- Player1 invites the rest of the players, and they all accept
+  propId <- foldlA (\ propId newPlayer -> do
+    inviteId <- submit (players !! 0) do
+      exercise propId InvitePlayer with player = (players !! 0); newPlayer
+    submit newPlayer do exercise inviteId AcceptPlayer) propId (drop 1 players)
+  
+  -- Player4 invites the dealer and they accept
+  inviteId <- submit (players !! 3) do
+    exercise propId InviteDealer with player = (players !! 3); newDealer = dealer
+  propId <- submit dealer do exercise inviteId AcceptDealer
 
-  submit bob do
-    exercise bobTV Give with newOwner = alice
+  -- The dealer starts the game and deals
+  gameId <- submit dealer do exercise propId StartGame with party = dealer
+  dealId <- submit dealer do exercise gameId StartDeal
+  handIds <- submit dealer do exercise dealId DoDeal with gameId; seed = 5
+  gameId <- submit dealer do exercise gameId AddHands with newHands = handIds
+  -- gameId <- submit dealer do exercise gameId TryThing -- with newHands = handIds
+
+  -- submit (players !! 0) do exercise (handIds !! 0) TryThing
+
+  pure ()

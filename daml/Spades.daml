@@ -1,0 +1,195 @@
+
+daml 1.2
+module Spades where
+
+import Cards
+import DA.List
+import DA.Optional
+
+
+-- A spade always trumps a non-spade, a card of the lead suit always trumps all
+--  non-spades, and otherwise cards are compared by their values
+compareWithLead : Suit -> Card -> Card -> Ordering
+compareWithLead sl (Card s1 v1) (Card s2 v2)
+  = let scmp = compare (suitToInt s1) (suitToInt s2)
+     in if scmp == EQ then compare v1 v2 else scmp
+  where suitToInt : Suit -> Int
+        suitToInt s | s == S    = 2
+                    | s == sl   = 1
+                    | otherwise = 0
+
+-- from GHC Prelude
+maximumBy : (a -> a -> Ordering) -> [a] -> a
+maximumBy f = foldl1 (\x y -> if f x y == GT then x else y)
+
+type Trick = [Card]
+
+-- returns the index of the player who won the given trick, using `compareWithLead`
+trickWinner : Trick -> Int
+trickWinner (cl::cs) = snd $ maximumBy (\(c1,_) (c2,_) -> compareWithLead (suit cl) c1 c2) (zip (cl::cs) [0..])
+trickWinner _ = error "trickWinner: empty list"
+
+score : Int -> Int -> Int
+score bet won | bet < 0 || bet > 13 = error $ "invalid bet: " <> show bet 
+              | won < 0 || won > 13 = error $ "invalid number of wins: " <> show won
+              | bet == 0 && won == 0 = 100
+              | bet == 0 && won >= 1 = -100
+              | won >= bet           = 10*bet + (won - bet)
+              | otherwise            = -10*bet
+
+-- from the list-grouping Haskell package
+splitEvery : Int -> [a] -> [[a]]
+splitEvery _ [] = []
+splitEvery n xs = let (as,bs) = splitAt n xs in as :: splitEvery n bs
+
+
+
+
+template GameProposal
+  with
+    players   : [Party]
+    dealerOpt : Optional Party
+  where
+    signatory players, dealerOpt
+    ensure unique players && length players >= 1 && length players <= 4
+
+    choice InvitePlayer : ContractId PlayerInvite
+      with 
+        player     : Party
+        newPlayer : Party
+      controller player
+      do
+        assert $ player `elem` players
+        assertMsg "Player has already been invited" $ newPlayer `notElem` players
+        create PlayerInvite with proposal = this; newPlayer
+
+    choice InviteDealer : ContractId DealerInvite
+      with
+        player    : Party
+        newDealer : Party
+      controller player
+      do
+        assert $ player `elem` players
+        assertMsg "A dealer has already been invited" $ dealerOpt == None
+        create DealerInvite with proposal = this; newDealer
+
+    choice StartGame : ContractId Spades
+      with
+        party : Party
+      controller party
+      do
+        assert $ party `elem` players || Some party == dealerOpt
+        assertMsg "Not enough parties have joined" $ length players == 4 && isSome dealerOpt
+        create Spades with players; dealer = fromSome dealerOpt; hands = []; topCard = None
+
+    -- controller dealerOpt can
+    --   nonconsuming StartGame : ContractId Deal
+    --     do
+    --       assertMsg "Not enough parties have joined" $ length players == 4 && isSome dealerOpt
+    --       let dealer = fromSome dealerOpt
+    --       create Deal with players; dealer
+
+
+template PlayerInvite
+  with
+    proposal  : GameProposal
+    newPlayer : Party
+  where
+    signatory proposal.players, proposal.dealerOpt
+    -- Wow! I originally had this as just the inviting party (which at the time made sense)
+    --  and the tooling was able to quite quickly help me spot this error
+    controller newPlayer can
+      AcceptPlayer : ContractId GameProposal
+        do
+          create proposal with players = newPlayer :: proposal.players
+
+template DealerInvite
+  with
+    proposal  : GameProposal
+    newDealer : Party
+  where
+    signatory proposal.players, proposal.dealerOpt
+    controller newDealer can
+      AcceptDealer : ContractId GameProposal
+        do
+          create proposal with dealerOpt = Some newDealer
+
+
+template Spades
+  with
+    players : [Party]
+    dealer  : Party
+    hands   : [ContractId Hand]
+    topCard : Optional Card
+  where
+    signatory players, dealer
+    ensure unique players && length players == 4
+
+    controller dealer can
+
+      nonconsuming StartDeal : ContractId Deal
+        do
+          assert $ length hands == 0
+          create Deal with players; dealer
+      
+      AddHands : ContractId Spades
+        with
+          newHands : [ContractId Hand]
+        do
+          assert $ length hands == 0 && length newHands == 4
+          create this with hands = newHands
+    
+    --   TryThing : ContractId Spades
+    --     do
+    --       assert $ length hands == 4
+    --       cd <- exercise (hands !! 0) GetTop
+    --       create this with topCard = Some cd
+      
+
+template Deal
+  with
+    players : [Party]
+    dealer  : Party
+  where
+    signatory dealer
+
+    controller dealer can
+      DoDeal : [ContractId Hand]
+        with
+          gameId : ContractId Spades
+          seed : Int
+        do 
+          let deck = runWithSeed (shuffle stdDeck) seed
+          mapA (\(player,hand) -> create Hand with gameId; player; dealer; hand = sort hand)
+               (zip (reverse players) (splitEvery 13 deck))
+
+template Hand
+  with
+    gameId : ContractId Spades
+    player : Party
+    dealer : Party
+    hand   : [Card]
+  where
+    signatory dealer
+    observer player
+
+    -- controller dealer can
+    --   nonconsuming GetTop : Card
+    --     do
+    --       pure (head hand)
+
+    -- controller player can
+    --   nonconsuming TryThing : Party
+    --     do
+    --       game <- fetch gameId
+    --       pure game.dealer
+
+
+-- Hand has a choice named RequestPlay, which takes a game state and an index
+--   and is controlled by the player
+-- Play is a contract signed by both a player and the dealer containing
+--  a game state and a card value
+-- Spades has a choice named MakePlay, which takes a Play and enacts it only if
+--  the gamestate matches the current one
+-- Game state is a type synonym of [(Player, Optional Card)] which always
+--  contains unique lists of length 4

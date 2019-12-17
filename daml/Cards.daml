@@ -1,53 +1,59 @@
 
 daml 1.2
-module Spades where
+module Cards where
 
 import DA.Action.State
-import DA.List
-
 
 -- The standard deck of cards
 
 data Suit = S | C | H | D
-  deriving (Eq, Show)
+  deriving (Eq, Ord, Show)
 
 data Card = Card with
-  value : Int
   suit  : Suit
-    deriving (Eq)
+  value : Int
+    deriving (Eq, Ord)
 
--- use this function rather than the `Card` constructor when making cards
-card : Int -> Suit -> Card
-card v s | v >= 1 && v <= 13 = Card v s
+-- constructor for `Card`s which insures values are in [1,13]
+card : Suit -> Int -> Card
+card s v | v >= 1 && v <= 13 = Card s v
          | otherwise = error "malformed card"
 
 instance Show Card where
-  show (Card v s) = show v <> " " <> show s
+  show (Card s v) = show v <> " " <> show s
 
 -- a standard 52-card deck
-deck : [Card]
-deck = card <$> [1..13] <*> [S,C,H,D]
+stdDeck : [Card]
+stdDeck = card <$> [S,C,H,D] <*> [1..13]
 
 
 -- Randomness and shuffling
 
-bitshift : Int -> Int -> Int
-bitshift x amt | amt >= 0  = x * 2^amt
-               | otherwise = truncate (intToDecimal x / 2.0^amt)
+-- terribly simple random number generator
+randLCG : Int -> Int
+randLCG x = (1103515245 * x + 12345) % (2 ^ 31)
 
--- source: Marsaglia, George 'Xorshift RNGs'
-xorshift : Int -> Int
-xorshift = doXorSh 17 . doXorSh (-7) . doXorSh 13
-  where doXorSh shamt x = x ^ (bitshift x shamt)
+-- xor : Int -> Int -> Int
+-- xor _ _ = error "xor not implemented" -- oops...
+
+-- bitshift : Int -> Int -> Int
+-- bitshift x amt | amt >= 0  = x * 2^amt
+--                | otherwise = truncate (intToDecimal x / 2.0^amt)
+
+-- source: Marsaglia, George. 'Xorshift RNGs'
+-- xorshift : Int -> Int
+-- xorshift = doXorSh 17 . doXorSh (-7) . doXorSh 13
+--   where doXorSh shamt x = xor x (bitshift x shamt)
 
 type Random a = State Int a
 
--- returns a random integer in the given range [lo,hi)
+-- returns a random integer in the given range [lo,hi]
 randomInt : (Int,Int) -> Random Int
-randomInt (lo,hi) = do
-  modify xorshift -- advance the seed
-  result <- get
-  pure (lo + result % (hi - lo))
+randomInt (lo,hi) | hi >= lo = do
+  modify randLCG -- advance the seed
+  result <- (/ 2^16) <$> get
+  pure (lo + result % (hi + 1 - lo))
+randomInt _ = error "randomInt: lo > hi"
 
 runWithSeed : Random a -> Int -> a
 runWithSeed = evalState
@@ -59,36 +65,3 @@ shuffle (x::xs) = do
   i <- randomInt (0, length xs)
   (ls,hs) <- splitAt i <$> (shuffle xs)
   pure (ls ++ [x] ++ hs)
-
-
--- Tricks and scoring
-
--- A spade always trumps a non-spade, a card of the lead suit always trumps all
---  non-spades, and otherwise cards are compared by their values
-compareWithLead : Suit -> Card -> Card -> Ordering
-compareWithLead sl (Card v1 s1) (Card v2 s2)
-  = let scmp = compare (suitToInt s1) (suitToInt s2)
-     in if scmp == EQ then compare v1 v2 else scmp
-  where suitToInt : Suit -> Int
-        suitToInt s | s == S    = 2
-                    | s == sl   = 1
-                    | otherwise = 0
-
--- from GHC Prelude
-maximumBy : (a -> a -> Ordering) -> [a] -> a
-maximumBy f = foldl1 (\x y -> if f x y == GT then x else y)
-
-type Trick = [Card]
-
--- returns the index of the player who won the given trick, using `compareWithLead`
-trickWinner : Trick -> Int
-trickWinner (cl::cs) = snd $ maximumBy (\(c1,_) (c2,_) -> compareWithLead (suit cl) c1 c2) (zip (cl::cs) [0..])
-trickWinner _ = error "trickWinner: empty list"
-
-score : Int -> Int -> Int
-score bet won | bet < 0 || bet > 13 = error $ "invalid bet: " <> show bet 
-              | won < 0 || won > 13 = error $ "invalid number of wins: " <> show won
-              | bet == 0 && won == 0 = 100
-              | bet == 0 && won >= 1 = -100
-              | won >= bet           = 10*bet + (won - bet)
-              | otherwise            = -10*bet
