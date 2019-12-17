@@ -37,8 +37,10 @@ setup = scenario do
     exercise propId InviteDealer with player = (players !! 3); newDealer = dealer
   propId <- submit dealer do exercise inviteId AcceptDealer
 
-  -- The dealer starts the bidding and deals
-  (dealId, biddingId) <- submit dealer do exercise propId StartBidding with party = dealer
+  -- Player2 starts the game
+  (dealId, biddingId) <- submit (players !! 1) do exercise propId StartGame with party = players !! 1
+  
+  -- The dealer gives the players their hands
   handIds <- submit dealer do exercise dealId DoDeal with seed = 5
 
   -- The players add their bids (based on their hands)
@@ -47,8 +49,8 @@ setup = scenario do
   biddingId <- submit (players !! 2) do exercise biddingId AddBid with player = players !! 2, bid = 8
   biddingId <- submit (players !! 3) do exercise biddingId AddBid with player = players !! 3, bid = 1
 
-  -- The dealer starts the game
-  gameId <- submit dealer do exercise biddingId StartGame
+  -- The dealer starts the first round
+  gameId <- submit dealer do exercise biddingId StartRound
   
   -- Player1 makes a play (D 11) and the dealer updates the board
   (playId, handIds) <- makePlay players gameId handIds 0 (Card D 11)
@@ -58,8 +60,8 @@ setup = scenario do
   (playId, handIds) <- makePlay players gameId handIds 1 (Card D 13)
   gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
 
-  -- Player3 makes a bad play (H 2) and the dealer updates the board
-  (playId, handIds) <- makePlay players gameId handIds 2 (Card H 2)
+  -- Player3 makes a throwaway play (D 2) and the dealer updates the board
+  (playId, handIds) <- makePlay players gameId handIds 2 (Card D 2)
   gameId <- fromOngoing <$> submit dealer do exercise gameId MakeNextPlay with playId
 
   -- Player4 makes a good play (S 1) and the dealer updates the board

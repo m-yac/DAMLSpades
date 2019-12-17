@@ -54,6 +54,10 @@ data GameState = GameState
     wins   : Map.Map Party Int
   deriving (Eq, Ord, Show)
 
+getLead : GameState -> Optional Suit
+getLead (GameState []    _ _) = None
+getLead (GameState board _ _) = Some . suit . snd $ last board
+
 -- given an order of play, creates an initial `GameState`
 initialState : [Party] -> GameState
 initialState players = GameState [] (head players) (Map.fromList (map ((,0)) players))
@@ -105,7 +109,7 @@ template GameProposal
         assertMsg "A dealer has already been invited" $ dealerOpt == None
         create DealerInvite with proposal = this; newDealer
 
-    choice StartBidding : (ContractId Deal, ContractId Bidding)
+    choice StartGame : (ContractId Deal, ContractId Bidding)
       with
         party : Party
       controller party
@@ -140,6 +144,7 @@ template DealerInvite
         do
           create proposal with dealerOpt = Some newDealer
 
+
 template Bidding
   with
     players : [Party]
@@ -162,7 +167,7 @@ template Bidding
         create this with bids = Map.insert player bid bids
 
     controller dealer can
-      StartGame : ContractId Spades
+      StartRound : ContractId Spades
         do
           assertMsg "Not all bids have been placed" $ Foldable.length bids == 4 && all (`Map.member` bids) players
           create Spades with players; dealer; bids; state = initialState players; scores
@@ -199,7 +204,7 @@ template Spades
           exercise playId FinalizePlay
           if isFinalState state'
           then let scores' = addToScores players bids state.wins scores
-                in if any (\player -> fromSome (Map.lookup player scores) >= 500) players
+                in if any (\player -> fromSome (Map.lookup player scores') >= 250) players
                    then pure (GameOver scores')
                    else RoundOver <$> create Bidding with players; dealer; bids = Map.empty; scores = scores'
           else Ongoing <$> create this with state = state'
@@ -238,6 +243,11 @@ template Hand
           state : GameState
         do
           assertMsg "Can only play cards in your hand" $ card `elem` hand
+          assertMsg "Invalid move" $ case getLead state of
+                                       None -> True
+                                       Some sl -> suit card == S
+                                                  || suit card == sl
+                                                  || sl `notElem` (suit <$> hand)
           play <- create Play with player; dealer; card; state
           hand <- create this with hand = delete card hand
           pure (play, hand)
